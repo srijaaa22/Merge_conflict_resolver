@@ -68,3 +68,26 @@ def parse_conflicts(file_path: str) -> list[dict]:
             theirs.append(line)
 
     return conflicted_blocks
+
+def analyze_repo(repo_path: str) -> dict:
+    files_with_conflicts = get_conflicted_files(repo_path)
+    conflicted_files = []
+
+    for filepath in files_with_conflicts:
+        full_path = os.path.join(repo_path, filepath)
+        hunks = parse_conflicts(full_path)
+
+        for index, hunk in enumerate(hunks):
+            hunk["hunk_id"] = f"{filepath}::{index}"
+
+        conflicted_files.append({
+            "filepath": filepath,
+            "conflict_count": len(hunks),
+            "hunks": hunks
+        })
+
+    return {
+        "repo_path": repo_path,
+        "conflicted_files": conflicted_files,
+        "total_conflicts": sum(f["conflict_count"] for f in conflicted_files)
+    }
