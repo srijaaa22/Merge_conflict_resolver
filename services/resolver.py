@@ -1,6 +1,11 @@
 import subprocess
+import os
 
 def get_conflicted_files(repo_path: str) -> list[str]:
+    if not os.path.exists(repo_path):
+        raise Exception(f"Path does not exist: {repo_path}")
+    if not os.path.exists(os.path.join(repo_path, ".git")):
+        raise Exception(f"Not a git repository: {repo_path}")
     try:
         result = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo_path, capture_output=True, text=True)
         if result.returncode != 0:
@@ -19,25 +24,38 @@ def parse_conflicts(file_path: str) -> list[dict]:
     theirs = []
     tracking = []
     post_context = 0
+    line_number = 0
+    conflict_start_line = None
 
-    for i in content:
-        if state == "normal" and not i.startswith(("<<<<<<<", "=======", ">>>>>>>")):
-            tracking.append(i)
+    for i, line in enumerate(content):
+        line_number = i + 1
+
+        if state == "normal" and not line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+            tracking.append(line)
             if post_context > 0:
-                conflicted_blocks[-1]["context"].append(i)
+                conflicted_blocks[-1]["context_after"].append(line)
                 post_context -= 1
 
-        if "<<<<<<<" in i:
+        if "<<<<<<<" in line:
             state = "in_ours"
+            conflict_start_line = line_number
             continue
 
-        if "=======" in i:
+        if "=======" in line:
             state = "in_theirs"
             continue
 
-        if ">>>>>>>" in i:
+        if ">>>>>>>" in line:
+            branch_name = line.replace(">>>>>>>", "").strip()
             state = "normal"
-            conflicted_blocks.append({"ours": ours, "theirs": theirs, "context": tracking[-3:]})
+            conflicted_blocks.append({
+                "ours": "".join(ours),
+                "theirs": "".join(theirs),
+                "branch_name": branch_name,
+                "context_before": tracking[-3:],
+                "context_after": [],
+                "line_number": conflict_start_line
+            })
             ours = []
             theirs = []
             tracking = []
@@ -45,8 +63,8 @@ def parse_conflicts(file_path: str) -> list[dict]:
             continue
 
         if state == "in_ours":
-            ours.append(i)
+            ours.append(line)
         elif state == "in_theirs":
-            theirs.append(i)
+            theirs.append(line)
 
     return conflicted_blocks
