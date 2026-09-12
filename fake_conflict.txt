@@ -1,0 +1,12 @@
+<<<<<<< HEAD
+b = a/5
+=======
+b = a/6
+>>>>>>> feature-branch
+c=3
+d=4
+<<<<<<< HEAD
+e = c+d
+=======
+e = c-d
+>>>>>>> feature-branch

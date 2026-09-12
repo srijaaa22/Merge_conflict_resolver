@@ -21,7 +21,7 @@ def parse_conflicts(file_path: str) -> list[dict]:
     post_context = 0
 
     for i in content:
-        if state == "normal":
+        if state == "normal" and not i.startswith(("<<<<<<<", "=======", ">>>>>>>")):
             tracking.append(i)
             if post_context > 0:
                 conflicted_blocks[-1]["context"].append(i)
