@@ -1,6 +1,7 @@
 import subprocess
 import os
 
+
 def get_conflicted_files(repo_path: str) -> list[str]:
     if not os.path.exists(repo_path):
         raise Exception(f"Path does not exist: {repo_path}")
@@ -10,9 +11,13 @@ def get_conflicted_files(repo_path: str) -> list[str]:
         result = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo_path, capture_output=True, text=True)
         if result.returncode != 0:
             raise Exception(result.stderr)
-        return result.stdout.strip().split("\n")
+        stdout = result.stdout.strip()
+        if not stdout:
+            return []  # no conflicts — was returning [''] before, which broke downstream file lookups
+        return stdout.split("\n")
     except Exception as e:
         raise e
+
 
 def parse_conflicts(file_path: str) -> list[dict]:
     with open(file_path, "r") as f:
@@ -68,6 +73,7 @@ def parse_conflicts(file_path: str) -> list[dict]:
             theirs.append(line)
 
     return conflicted_blocks
+
 
 def analyze_repo(repo_path: str) -> dict:
     files_with_conflicts = get_conflicted_files(repo_path)
