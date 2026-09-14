@@ -1,0 +1,3 @@
+analyzed_hunks = {}
+
+history = {}

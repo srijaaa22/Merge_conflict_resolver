@@ -50,6 +50,21 @@ Design doc for all endpoints, written before implementation (Days 11–12).
 - `200` — no conflicts found → empty `conflicted_files` list, `total_conflicts: 0` (this is NOT an error case)
 - `500` — underlying git command failed for another reason
 
+**Storage design decision:** every call to `/analyze` stores its resulting hunks into a shared
+in-memory dict, keyed by `hunk_id` (`{hunk_id: hunk_dict}`). Calls **merge into** this dict rather
+than wiping it — analyzing repo A, then repo B, keeps both available for `/resolve` afterward. This
+is what enables `/resolve` to look up a hunk by ID alone (see below), instead of requiring the
+client to resend full hunk data.
+
+Tradeoff accepted knowingly: `hunk_id` is built as `filepath::index` (relative file path + position
+in that file's hunk list) and does **not** encode which repo it came from. Two different repos that
+happen to share a relative file path (e.g. both have a `README.md`) can produce colliding
+`hunk_id`s. Since storage merges rather than wipes, a later `/analyze` call on repo B can silently
+overwrite repo A's entry for that same ID — a stale `hunk_id` for repo A would then resolve against
+repo B's content instead, with no error raised. Accepted as a known, low-priority limitation for
+now (single-user, mostly one-repo-at-a-time usage); revisit if multi-repo/multi-session support is
+built later (see Day 27 notes), likely by namespacing storage keys by repo or session at that point.
+
 ---
 
 ## POST /resolve
@@ -59,14 +74,7 @@ Design doc for all endpoints, written before implementation (Days 11–12).
 **Request:**
 ```json
 {
-  "hunk": {
-    "hunk_id": "string",
-    "ours": "string",
-    "theirs": "string",
-    "branch_name": "string",
-    "context_before": "string",
-    "context_after": "string"
-  },
+  "hunk_id": "string",
   "strategy": "smart",
   "repo_path": null
 }
@@ -77,9 +85,10 @@ Design doc for all endpoints, written before implementation (Days 11–12).
 - `repo_path` is **optional**, defaults to `null`. Not used yet — reserved for the Day 27 optional
   improvement (passing `git log --oneline` context to the LLM). Added now as optional so the request
   schema doesn't need a breaking change later.
-- Design decision: `hunk` is fully self-contained (carries ours/theirs/context) for the current
-  "smart" resolution logic. `repo_path` is the only field that would require filesystem access, and
-  it's unused for now.
+- Design decision: `/resolve` takes a `hunk_id` and looks up the actual hunk content server-side,
+  from the in-memory store populated by `/analyze` (see storage design decision above). This keeps
+  the client from having to shuttle full hunk data (ours/theirs/context/etc.) back and forth on
+  every call — it only needs to remember an ID it already received from `/analyze`.
 - **Session handling:** if `X-Session-Id` is present, use it. If absent, the server generates a new
   UUID, creates an empty history bucket for it, and returns it via an `X-Session-Id` response header.
   Server-generated over client-chosen because a client could pick a colliding/guessable ID and see
@@ -104,6 +113,8 @@ Design doc for all endpoints, written before implementation (Days 11–12).
 - `strategy` (in the response) is one of `"took_ours" | "took_theirs" | "merged_both" | "rewrote"`.
 
 **Errors:**
+- `404` — `hunk_id` not found in server storage (e.g. `/analyze` was never called for this hunk, or
+  the server restarted and lost in-memory state)
 - `422` — invalid `strategy` value in request (Pydantic/Enum catches this automatically)
 - `503` — Gemini API call failed (rate limit / network error) — response should include retry guidance
 - `500` — unexpected failure (e.g. malformed hunk data)
@@ -186,6 +197,10 @@ server generates a fresh one (empty by definition) and returns `deleted_count: 0
       collision/guessing risk since the server is the only party that can guarantee uniqueness.
 - [x] ~~Should `/resolve` responses carry a risk signal separate from confidence?~~
       Resolved: added `risk_flag` (`low`/`medium`/`high`), placeholder `"low"` until real logic exists.
+- [x] ~~Should `/resolve` take the full hunk object, or look it up by `hunk_id`?~~
+      Resolved: looks up by `hunk_id` against a server-side in-memory store populated by `/analyze`.
+      Store merges across `/analyze` calls (doesn't wipe), so multiple repos' hunks can coexist.
+      Known collision risk accepted (see `/analyze` storage design decision above).
 - [ ] Should `/analyze` support something other than a local repo path (e.g. `diff_payload`)?
       Deferred — revisit after the core project is functional end-to-end. Likely needed for the
       Day 27 CI/GitHub Action candidate, since a CI runner won't have a persistent local clone.
