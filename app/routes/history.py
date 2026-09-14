@@ -2,7 +2,7 @@ from fastapi import APIRouter, Header, Response
 import uuid
 
 from app.state import history
-from app.models.schemas import HistoryResponse, HistoryEntry
+from app.models.schemas import HistoryResponse
 
 router = APIRouter()
 
