@@ -55,3 +55,11 @@ class ResolveResponse(BaseModel):
     confidence: Confidence
     risk_flag: RiskFlag
     strategy: ResolutionStrategy
+
+class HistoryEntry(BaseModel):
+    hunk_id: str
+    result: ResolveResponse
+
+class HistoryResponse(BaseModel):
+    history: list[HistoryEntry]
+    count: int
