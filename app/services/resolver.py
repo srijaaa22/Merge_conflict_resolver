@@ -1,99 +1,142 @@
-import subprocess
-import os
+import logging
+import uuid
+
+from dotenv import load_dotenv
+
+from app.models.schemas import (
+    Confidence,
+    HistoryEntry,
+    ResolutionStrategy,
+    ResolveResponse,
+    RiskFlag,
+    Strategy,
+)
+from app.state import analyzed_hunks, history
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+GEMINI_MODEL = "gemini-3.6-flash"
+_client = None
 
 
-def get_conflicted_files(repo_path: str) -> list[str]:
-    if not os.path.exists(repo_path):
-        raise Exception(f"Path does not exist: {repo_path}")
-    if not os.path.exists(os.path.join(repo_path, ".git")):
-        raise Exception(f"Not a git repository: {repo_path}")
+class HunkNotFoundError(Exception):
+    """hunk_id isn't in server storage (maps to HTTP 404)."""
+
+
+class LLMUnavailableError(Exception):
+    """Gemini call failed: rate limit, network, missing key, etc. (maps to HTTP 503)."""
+
+
+class LLMResponseError(Exception):
+    """Gemini returned output that doesn't match our schema (maps to HTTP 500)."""
+
+
+def _get_client():
+    """Create the Gemini client on first use, so ours/theirs never need a key or the SDK."""
+    global _client
+    if _client is None:
+        from google import genai
+        _client = genai.Client()
+    return _client
+
+
+def ensure_session(session_id: str | None) -> tuple[str, bool]:
+    """Return (session_id, is_new). Generates a server-side UUID when none is supplied."""
+    if not session_id:
+        return str(uuid.uuid4()), True
+    return session_id, False
+
+
+def build_prompt(hunk: dict) -> str:
+    """Format a hunk dict into a labeled prompt for the smart resolution strategy."""
+    # Each context line already ends in a newline, so join with "" (not "\n").
+    context_before = "".join(hunk.get("context_before", []))
+    context_after = "".join(hunk.get("context_after", []))
+
+    return f"""
+You are an expert at resolving Git merge conflicts.
+
+File: {hunk.get("filepath", "unknown")}
+
+Context before the conflict:
+{context_before}
+
+Ours (HEAD):
+{hunk["ours"]}
+
+Theirs (branch: {hunk["branch_name"]}):
+{hunk["theirs"]}
+
+Context after the conflict:
+{context_after}
+
+Task: propose the single best resolution for this conflict. Commit to one resolution,
+do not present multiple options. Explain your reasoning briefly.
+"""
+
+
+def _resolve_with_llm(hunk: dict) -> ResolveResponse:
+    prompt = build_prompt(hunk)
+
     try:
-        result = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo_path, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise Exception(result.stderr)
-        stdout = result.stdout.strip()
-        if not stdout:
-            return []  # no conflicts — was returning [''] before, which broke downstream file lookups
-        return stdout.split("\n")
+        interaction = _get_client().interactions.create(
+            model=GEMINI_MODEL,
+            input=prompt,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": ResolveResponse.model_json_schema(),
+            },
+        )
     except Exception as e:
-        raise e
+        logger.error("Gemini call failed: %s", e)
+        raise LLMUnavailableError("LLM service unavailable, please retry shortly") from e
+
+    try:
+        res = ResolveResponse.model_validate_json(interaction.output_text)
+    except (ValueError, TypeError) as e:  # pydantic's ValidationError is a ValueError
+        logger.error("Malformed Gemini output: %s", e)
+        raise LLMResponseError("Malformed response from LLM") from e
+
+    # risk_flag is a placeholder until real flagging logic exists; don't trust the model's value.
+    return res.model_copy(update={"risk_flag": RiskFlag.LOW})
 
 
-def parse_conflicts(file_path: str) -> list[dict]:
-    with open(file_path, "r") as f:
-        content = f.readlines()
+def resolve_hunk(hunk_id: str, strategy: Strategy | str, session_id: str) -> ResolveResponse:
+    strategy = Strategy(strategy)  # accepts plain strings too (e.g. from MCP tools)
 
-    state = "normal"
-    conflicted_blocks = []
-    ours = []
-    theirs = []
-    tracking = []
-    post_context = 0
-    line_number = 0
-    conflict_start_line = None
+    hunk = analyzed_hunks.get(hunk_id)
+    if hunk is None:
+        raise HunkNotFoundError(f"hunk_id not found: {hunk_id}")
 
-    for i, line in enumerate(content):
-        line_number = i + 1
+    if strategy == Strategy.OURS:
+        res = ResolveResponse(
+            resolution=hunk["ours"],
+            reasoning="took ours as-is, no LLM resolution",
+            confidence=Confidence.HIGH,
+            risk_flag=RiskFlag.LOW,
+            strategy=ResolutionStrategy.TOOK_OURS,
+        )
+    elif strategy == Strategy.THEIRS:
+        res = ResolveResponse(
+            resolution=hunk["theirs"],
+            reasoning="took theirs as-is, no LLM resolution",
+            confidence=Confidence.HIGH,
+            risk_flag=RiskFlag.LOW,
+            strategy=ResolutionStrategy.TOOK_THEIRS,
+        )
+    else:
+        res = _resolve_with_llm(hunk)
 
-        if state == "normal" and not line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
-            tracking.append(line)
-            if post_context > 0:
-                conflicted_blocks[-1]["context_after"].append(line)
-                post_context -= 1
-
-        if "<<<<<<<" in line:
-            state = "in_ours"
-            conflict_start_line = line_number
-            continue
-
-        if "=======" in line:
-            state = "in_theirs"
-            continue
-
-        if ">>>>>>>" in line:
-            branch_name = line.replace(">>>>>>>", "").strip()
-            state = "normal"
-            conflicted_blocks.append({
-                "ours": "".join(ours),
-                "theirs": "".join(theirs),
-                "branch_name": branch_name,
-                "context_before": tracking[-3:],
-                "context_after": [],
-                "line_number": conflict_start_line
-            })
-            ours = []
-            theirs = []
-            tracking = []
-            post_context = 3
-            continue
-
-        if state == "in_ours":
-            ours.append(line)
-        elif state == "in_theirs":
-            theirs.append(line)
-
-    return conflicted_blocks
+    history.setdefault(session_id, []).append(HistoryEntry(hunk_id=hunk_id, result=res))
+    return res
 
 
-def analyze_repo(repo_path: str) -> dict:
-    files_with_conflicts = get_conflicted_files(repo_path)
-    conflicted_files = []
+def get_history(session_id: str) -> list[HistoryEntry]:
+    return history.get(session_id, [])
 
-    for filepath in files_with_conflicts:
-        full_path = os.path.join(repo_path, filepath)
-        hunks = parse_conflicts(full_path)
 
-        for index, hunk in enumerate(hunks):
-            hunk["hunk_id"] = f"{filepath}::{index}"
-
-        conflicted_files.append({
-            "filepath": filepath,
-            "conflict_count": len(hunks),
-            "hunks": hunks
-        })
-
-    return {
-        "repo_path": repo_path,
-        "conflicted_files": conflicted_files,
-        "total_conflicts": sum(f["conflict_count"] for f in conflicted_files)
-    }
+def clear_history(session_id: str) -> int:
+    return len(history.pop(session_id, []))
