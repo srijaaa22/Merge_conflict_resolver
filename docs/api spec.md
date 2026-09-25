@@ -111,6 +111,7 @@ built later (see Day 27 notes), likely by namespacing storage keys by repo or se
   (file-path rules, keyword checks, etc.) is built. Included now so the response schema doesn't
   change shape later.
 - `strategy` (in the response) is one of `"took_ours" | "took_theirs" | "merged_both" | "rewrote"`.
+Interface-dependent behavior: strategy="smart" resolves differently depending on which interface it's called through. Over REST, smart calls Gemini directly, since there's no host model present to reason about the hunk. Over MCP, smart does not call Gemini — the tool returns the raw hunk (ours/theirs/context) and the calling host's own model produces the merged/rewritten resolution instead, per the skill file's instructions. Same request/response schema either way; the reasoner differs by interface, not the contract.
 
 **Errors:**
 - `404` — `hunk_id` not found in server storage (e.g. `/analyze` was never called for this hunk, or
