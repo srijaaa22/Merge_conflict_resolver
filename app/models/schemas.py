@@ -46,7 +46,7 @@ class ResolutionStrategy(str, Enum):
 
 class ResolveRequest(BaseModel):
     hunk_id: str
-    strategy: Strategy = "smart"
+    strategy: Strategy = Strategy.SMART
     repo_path: str | None = None
 
 class ResolveResponse(BaseModel):
