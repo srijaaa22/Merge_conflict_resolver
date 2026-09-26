@@ -42,6 +42,13 @@ def _get_client():
     return _client
 
 
+def get_hunk(hunk_id : str) -> dict:
+    hunk = analyzed_hunks.get(hunk_id)
+    if hunk is None:
+        raise HunkNotFoundError(f"hunk_id not found: {hunk_id}")
+    return hunk
+
+
 def ensure_session(session_id: str | None) -> tuple[str, bool]:
     """Return (session_id, is_new). Generates a server-side UUID when none is supplied."""
     if not session_id:
@@ -56,25 +63,25 @@ def build_prompt(hunk: dict) -> str:
     context_after = "".join(hunk.get("context_after", []))
 
     return f"""
-You are an expert at resolving Git merge conflicts.
+    You are an expert at resolving Git merge conflicts.
 
-File: {hunk.get("filepath", "unknown")}
+    File: {hunk.get("filepath", "unknown")}
 
-Context before the conflict:
-{context_before}
+    Context before the conflict:
+    {context_before}
 
-Ours (HEAD):
-{hunk["ours"]}
+    Ours (HEAD):
+    {hunk["ours"]}
 
-Theirs (branch: {hunk["branch_name"]}):
-{hunk["theirs"]}
+    Theirs (branch: {hunk["branch_name"]}):
+    {hunk["theirs"]}
 
-Context after the conflict:
-{context_after}
+    Context after the conflict:
+    {context_after}
 
-Task: propose the single best resolution for this conflict. Commit to one resolution,
-do not present multiple options. Explain your reasoning briefly.
-"""
+    Task: propose the single best resolution for this conflict. Commit to one resolution,
+    do not present multiple options. Explain your reasoning briefly.
+    """
 
 
 def _resolve_with_llm(hunk: dict) -> ResolveResponse:
@@ -107,9 +114,7 @@ def _resolve_with_llm(hunk: dict) -> ResolveResponse:
 def resolve_hunk(hunk_id: str, strategy: Strategy | str, session_id: str) -> ResolveResponse:
     strategy = Strategy(strategy)  # accepts plain strings too (e.g. from MCP tools)
 
-    hunk = analyzed_hunks.get(hunk_id)
-    if hunk is None:
-        raise HunkNotFoundError(f"hunk_id not found: {hunk_id}")
+    hunk = get_hunk(hunk_id)
 
     if strategy == Strategy.OURS:
         res = ResolveResponse(
