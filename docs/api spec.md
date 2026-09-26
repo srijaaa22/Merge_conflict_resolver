@@ -1,6 +1,6 @@
 # Merge Conflict Resolver — API Spec (Revised)
 
-Design doc for all endpoints, written before implementation (Days 11–12).
+Design doc for all endpoints, written before implementation (Days 11–12). Updated Day 20 per the roadmap addendum's §6.
 
 ---
 
@@ -93,6 +93,14 @@ built later (see Day 27 notes), likely by namespacing storage keys by repo or se
   UUID, creates an empty history bucket for it, and returns it via an `X-Session-Id` response header.
   Server-generated over client-chosen because a client could pick a colliding/guessable ID and see
   another user's history — the server is the only party that can guarantee uniqueness.
+- **Interface-dependent behavior (added Day 20):** `strategy="smart"` resolves differently
+  depending on which interface it's called through. Over REST, `smart` calls Gemini directly,
+  since there's no host model present to reason about the hunk. Over MCP, `smart` does **not**
+  call Gemini — the tool returns the raw hunk (`ours`/`theirs`/context) and the calling host's
+  own model produces the merged/rewritten resolution instead, per the MCP skill file's
+  instructions. Same request/response schema either way; the reasoner differs by interface, not
+  the contract. (See the roadmap addendum, §2.1 and §9, for the design rationale and Day 20
+  end-to-end confirmation that MCP's `smart` path requires no Gemini API key at all.)
 
 **Success (200):**
 ```json
@@ -111,13 +119,20 @@ built later (see Day 27 notes), likely by namespacing storage keys by repo or se
   (file-path rules, keyword checks, etc.) is built. Included now so the response schema doesn't
   change shape later.
 - `strategy` (in the response) is one of `"took_ours" | "took_theirs" | "merged_both" | "rewrote"`.
-Interface-dependent behavior: strategy="smart" resolves differently depending on which interface it's called through. Over REST, smart calls Gemini directly, since there's no host model present to reason about the hunk. Over MCP, smart does not call Gemini — the tool returns the raw hunk (ours/theirs/context) and the calling host's own model produces the merged/rewritten resolution instead, per the skill file's instructions. Same request/response schema either way; the reasoner differs by interface, not the contract.
+- **Note on MCP's `smart` path:** the MCP tool's raw-hunk-fetch response for `smart` does **not**
+  match this `ResolveResponse` shape — it returns the underlying hunk fields (`ours`, `theirs`,
+  `branch_name`, `context_before`, `context_after`) instead, since no resolution has been produced
+  yet at that point. The calling host is expected to produce a `ResolveResponse`-shaped result
+  itself afterward. This spec's response shape above describes REST's `/resolve` and MCP's
+  `ours`/`theirs` strategies only.
 
 **Errors:**
 - `404` — `hunk_id` not found in server storage (e.g. `/analyze` was never called for this hunk, or
   the server restarted and lost in-memory state)
 - `422` — invalid `strategy` value in request (Pydantic/Enum catches this automatically)
-- `503` — Gemini API call failed (rate limit / network error) — response should include retry guidance
+- `503` — Gemini API call failed (rate limit / network error) — response should include retry
+  guidance. **This is a REST-only error condition for `smart`** — MCP's `smart` path cannot hit
+  `503` at all, since it never calls Gemini (added Day 20, per §6).
 - `500` — unexpected failure (e.g. malformed hunk data)
 
 ---
@@ -160,6 +175,12 @@ an empty list — not an error.
 - Data is still lost on server restart (e.g. Render free-tier spin-down). This is an accepted
   limitation for a learning project, not a bug — documented here so it's not a surprise later.
   Scoping by session solves *whose* history it is, not *how long* it survives.
+- **MCP note (added Day 20):** MCP has no HTTP headers, so `X-Session-Id` doesn't apply there.
+  The equivalent MCP tool, `list_resolution_history`, uses a single fixed session ID generated
+  once when the MCP server process starts (see roadmap addendum §3, resolved Day 20), rather
+  than a per-request header. It also only reflects `ours`/`theirs` resolutions — `smart`
+  resolutions on MCP are produced by the host model directly and are never sent back to the
+  server to record, so they don't appear in this history.
 
 ---
 
@@ -184,6 +205,9 @@ server generates a fresh one (empty by definition) and returns `deleted_count: 0
 **Errors:** none expected. Clearing an already-empty or nonexistent session still returns `200` with
 `deleted_count: 0` — not an error.
 
+**MCP note (added Day 20):** the equivalent MCP tool, `clear_resolution_history`, clears the same
+fixed-session-ID history described above and returns the same `deleted_count` semantics.
+
 ---
 
 ## Open questions / assumptions to revisit
@@ -191,7 +215,8 @@ server generates a fresh one (empty by definition) and returns `deleted_count: 0
 - [x] ~~Should `/resolve` accept a `repo_path` as well, in case future strategies need filesystem context?~~
       Resolved: added as optional field, defaults to `null`, unused until Day 27.
 - [x] ~~Should history be keyed by session/user, or is a single global in-memory list acceptable for now?~~
-      Resolved: keyed by `X-Session-Id` header across `/resolve`, `GET /history`, `DELETE /history`.
+      Resolved: keyed by `X-Session-Id` header across `/resolve`, `GET /history`, `DELETE /history`
+      on REST; keyed by a fixed process-lifetime session ID on MCP (Day 20).
 - [x] ~~Who generates `X-Session-Id` — client or server?~~
       Resolved: server auto-generates on first contact (when header is absent) and returns it via a
       response header. Client-supplied IDs are trusted if already present. Server-generated avoids
@@ -202,7 +227,17 @@ server generates a fresh one (empty by definition) and returns `deleted_count: 0
       Resolved: looks up by `hunk_id` against a server-side in-memory store populated by `/analyze`.
       Store merges across `/analyze` calls (doesn't wipe), so multiple repos' hunks can coexist.
       Known collision risk accepted (see `/analyze` storage design decision above).
+- [x] ~~Should `smart` behave the same across REST and MCP?~~ (Day 18/20)
+      Resolved: no. REST's `smart` calls Gemini; MCP's `smart` returns the raw hunk for the host
+      model to reason about, with no Gemini call and no Gemini key required. See `/resolve`'s
+      interface-dependent behavior note above.
+- [x] ~~What session mechanism does MCP use, given it has no HTTP headers?~~ (Day 20)
+      Resolved: a single fixed session ID generated once per MCP server process. See `GET /history`'s
+      MCP note above and the roadmap addendum §3.
 - [ ] Should `/analyze` support something other than a local repo path (e.g. `diff_payload`)?
       Deferred — revisit after the core project is functional end-to-end. Likely needed for the
       Day 27 CI/GitHub Action candidate, since a CI runner won't have a persistent local clone.
 - [ ] What's the max hunk size passed to Gemini before truncating context (see Day 24 edge case: >200 line hunks)?
+- [ ] Should an `apply_resolution` MCP tool be added, so a host that can edit files (e.g. Claude
+      Code) can write a resolution back to disk? Not needed for REST. Undecided as of Day 20 —
+      see roadmap addendum §5.

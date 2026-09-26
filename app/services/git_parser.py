@@ -3,7 +3,6 @@ import os
 
 from app.state import analyzed_hunks
 
-
 class InvalidRepoError(Exception):
     """Bad input: path missing or not a git repo (maps to HTTP 400)."""
 
