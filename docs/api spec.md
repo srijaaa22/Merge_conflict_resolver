@@ -27,22 +27,25 @@ Design doc for all endpoints, written before implementation (Days 11–12). Upda
     {
       "filepath": "string",
       "conflict_count": 0,
+      "warnings": ["string"],
       "hunks": [
         {
           "hunk_id": "string",
           "ours": "string",
           "theirs": "string",
           "branch_name": "string",
-          "context_before": "string",
-          "context_after": "string",
+          "context_before": ["string"],
+          "context_after": ["string"],
           "line_number": 0
         }
       ]
     }
   ],
-  "total_conflicts": 0
-}
+  "total_conflicts": 0,
+  "message": "string | null"
+} 
 ```
+context_before / context_after are lists of lines (up to 10 each side). warnings lists per-file problems (binary file skipped, unfinished or malformed conflict dropped, non-UTF-8 bytes replaced). message is set when nothing parsable was found. Both fields are additive and optional for clients. Known limitation: conflict markers at column 0 inside string literals, such as test fixtures, can't be distinguished by a line parser, and the diff3 ||||||| base section is not supported.
 
 **Errors:**
 - `400` — `repo_path` does not exist on disk

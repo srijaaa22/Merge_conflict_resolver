@@ -16,6 +16,8 @@ def analyze_conflicts(repo_path : str) -> dict:
     Returns all conflicted files and their parsed hunks
     with surrounding context. Use this first to understand
     what conflicts exist before attempting resolution.
+    Results may include per-file `warnings` (skipped binary files, malformed
+    conflict markers) and a top-level `message`. Always show these to the user.
     """
     return analyze_repo(repo_path)
 

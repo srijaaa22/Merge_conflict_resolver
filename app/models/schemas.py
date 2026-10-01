@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from enum import Enum
 
 class Hunk(BaseModel):
@@ -14,11 +14,13 @@ class ConflictedFile(BaseModel):
     filepath: str
     conflict_count: int
     hunks: list[Hunk]
+    warnings: list[str] = Field(default_factory=list)
 
 class AnalyzeResponse(BaseModel):
     repo_path: str
     conflicted_files: list[ConflictedFile]
     total_conflicts: int
+    message: str | None = None
 
 class AnalyzeRequest(BaseModel):
     repo_path: str

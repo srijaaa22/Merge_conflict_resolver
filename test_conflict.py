@@ -1,14 +1,6 @@
-'''from services.resolver import parse_conflicts
+import json
 
-result = parse_conflicts("fake_conflict.txt")
-print(result)'''
+from app.services.git_parser import analyze_repo
 
-'''from services.resolver import get_conflicted_files
-
-result = get_conflicted_files(r"C:\\Users\\srija\\OneDrive\\Desktop\\conflict-practice")
-print(result)'''
-
-from services.resolver import analyze_repo
-
-result = analyze_repo(r"C:\\Users\\srija\\OneDrive\\Desktop\\conflict-practice")
-print(result)
+result = analyze_repo(r"C:\Users\srija\OneDrive\Desktop\conflict-practice")
+print(json.dumps(result, indent=2))
