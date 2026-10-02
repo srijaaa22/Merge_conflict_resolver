@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 
 from dotenv import load_dotenv
@@ -19,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-3.6-flash"
 _client = None
+
+# Max lines of "ours" / "theirs" (each, separately) sent to Gemini.
+# Longer sides keep their first and last MAX_HUNK_LINES // 2 lines.
+# Only the prompt is trimmed: stored hunks, ours/theirs resolutions and
+# MCP's raw hunk fetch always keep the full text.
+MAX_HUNK_LINES = 200
 
 
 class HunkNotFoundError(Exception):
@@ -42,7 +49,7 @@ def _get_client():
     return _client
 
 
-def get_hunk(hunk_id : str) -> dict:
+def get_hunk(hunk_id: str) -> dict:
     hunk = analyzed_hunks.get(hunk_id)
     if hunk is None:
         raise HunkNotFoundError(f"hunk_id not found: {hunk_id}")
@@ -56,25 +63,54 @@ def ensure_session(session_id: str | None) -> tuple[str, bool]:
     return session_id, False
 
 
-def build_prompt(hunk: dict) -> str:
-    """Format a hunk dict into a labeled prompt for the smart resolution strategy."""
+def _truncate_side(text: str) -> tuple[str, int]:
+    """Cap one side of a conflict at MAX_HUNK_LINES.
+
+    Returns (text_for_prompt, lines_omitted). Text within the cap is returned
+    unchanged with 0 omitted. Otherwise the first and last MAX_HUNK_LINES // 2
+    lines are kept with an explicit marker in between.
+    """
+    lines = re.findall(r"[^\n]*\n|[^\n]+", text)
+    if len(lines) <= MAX_HUNK_LINES:
+        return text, 0
+
+    keep = MAX_HUNK_LINES // 2
+    omitted = len(lines) - 2 * keep
+    marker = f"[... {omitted} lines omitted ...]\n"
+    return "".join(lines[:keep]) + marker + "".join(lines[-keep:]), omitted
+
+
+def _build_prompt(hunk: dict) -> tuple[str, int, int]:
+    """Return (prompt, ours_lines_omitted, theirs_lines_omitted)."""
     # Each context line already ends in a newline, so join with "" (not "\n").
     context_before = "".join(hunk.get("context_before", []))
     context_after = "".join(hunk.get("context_after", []))
 
-    return f"""
-    You are an expert at resolving Git merge conflicts.
+    ours, ours_omitted = _truncate_side(hunk["ours"])
+    theirs, theirs_omitted = _truncate_side(hunk["theirs"])
 
+    truncation_note = ""
+    if ours_omitted or theirs_omitted:
+        truncation_note = (
+            "\n    NOTE: one or both sides below were too long and had their middle lines "
+            "replaced by a marker like [... N lines omitted ...]. Do not guess or invent the "
+            "omitted code. Keep your resolution conservative and mention the truncation in "
+            "your reasoning.\n"
+        )
+
+    prompt = f"""
+    You are an expert at resolving Git merge conflicts.
+{truncation_note}
     File: {hunk.get("filepath", "unknown")}
 
     Context before the conflict:
     {context_before}
 
     Ours (HEAD):
-    {hunk["ours"]}
+    {ours}
 
     Theirs (branch: {hunk["branch_name"]}):
-    {hunk["theirs"]}
+    {theirs}
 
     Context after the conflict:
     {context_after}
@@ -82,10 +118,16 @@ def build_prompt(hunk: dict) -> str:
     Task: propose the single best resolution for this conflict. Commit to one resolution,
     do not present multiple options. Explain your reasoning briefly.
     """
+    return prompt, ours_omitted, theirs_omitted
+
+
+def build_prompt(hunk: dict) -> str:
+    """Format a hunk dict into a labeled prompt for the smart resolution strategy."""
+    return _build_prompt(hunk)[0]
 
 
 def _resolve_with_llm(hunk: dict) -> ResolveResponse:
-    prompt = build_prompt(hunk)
+    prompt, ours_omitted, theirs_omitted = _build_prompt(hunk)
 
     try:
         interaction = _get_client().interactions.create(
@@ -108,7 +150,19 @@ def _resolve_with_llm(hunk: dict) -> ResolveResponse:
         raise LLMResponseError("Malformed response from LLM") from e
 
     # risk_flag is a placeholder until real flagging logic exists; don't trust the model's value.
-    return res.model_copy(update={"risk_flag": RiskFlag.LOW})
+    update = {"risk_flag": RiskFlag.LOW}
+
+    if ours_omitted or theirs_omitted:
+        # The model only saw part of the conflict, so never let this look trustworthy.
+        update["confidence"] = Confidence.LOW
+        update["reasoning"] = (
+            f"{res.reasoning}\n\n"
+            f"WARNING: input was truncated before reaching the model "
+            f"({ours_omitted} lines omitted from 'ours', {theirs_omitted} from 'theirs'). "
+            f"This resolution is based on partial input; review it manually before using it."
+        )
+
+    return res.model_copy(update=update)
 
 
 def resolve_hunk(hunk_id: str, strategy: Strategy | str, session_id: str) -> ResolveResponse:
