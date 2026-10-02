@@ -122,6 +122,7 @@ built later (see Day 27 notes), likely by namespacing storage keys by repo or se
   (file-path rules, keyword checks, etc.) is built. Included now so the response schema doesn't
   change shape later.
 - `strategy` (in the response) is one of `"took_ours" | "took_theirs" | "merged_both" | "rewrote"`.
+- if the hunk was truncated, confidence is low and reasoning ends with a truncation warning.
 - **Note on MCP's `smart` path:** the MCP tool's raw-hunk-fetch response for `smart` does **not**
   match this `ResolveResponse` shape — it returns the underlying hunk fields (`ours`, `theirs`,
   `branch_name`, `context_before`, `context_after`) instead, since no resolution has been produced
